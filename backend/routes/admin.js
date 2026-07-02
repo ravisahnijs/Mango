@@ -117,29 +117,52 @@ router.get('/dashboard', adminAuth, async (req, res) => {
       return res.status(500).json({ success: false, message: 'Supabase client connected nahi hai!' });
     }
 
-    // A. Fetch total users from public.profiles
+    // A. Fetch total users from public.profiles using standard GET instead of HEAD for proxy compatibility
     const { count: totalUsers, error: usersErr } = await supabase
       .from('profiles')
-      .select('*', { count: 'exact', head: true });
-    console.log('USERS QUERY RESULT:', { totalUsers, usersErr });
+      .select('id', { count: 'exact' })
+      .limit(1);
+    console.log('USERS QUERY RESULT:', { totalUsers });
+    if (usersErr) {
+      console.error('USERS QUERY DETAILED ERROR:', {
+        message: usersErr.message,
+        code: usersErr.code,
+        details: usersErr.details,
+        hint: usersErr.hint
+      });
+      throw new Error(`Profiles count query failed: [${usersErr.code || 'NO_CODE'}] ${usersErr.message || 'No message'}. Details: ${usersErr.details || 'None'}`);
+    }
 
-    if (usersErr) throw usersErr;
-
-    // B. Fetch total bets from public.bets
+    // B. Fetch total bets from public.bets using standard GET instead of HEAD for proxy compatibility
     const { count: totalBets, error: betsErr } = await supabase
       .from('bets')
-      .select('*', { count: 'exact', head: true });
-    console.log('BETS QUERY RESULT:', { totalBets, betsErr });
-
-    if (betsErr) throw betsErr;
+      .select('id', { count: 'exact' })
+      .limit(1);
+    console.log('BETS QUERY RESULT:', { totalBets });
+    if (betsErr) {
+      console.error('BETS QUERY DETAILED ERROR:', {
+        message: betsErr.message,
+        code: betsErr.code,
+        details: betsErr.details,
+        hint: betsErr.hint
+      });
+      throw new Error(`Bets count query failed: [${betsErr.code || 'NO_CODE'}] ${betsErr.message || 'No message'}. Details: ${betsErr.details || 'None'}`);
+    }
 
     // C. Fetch all bets with columns bet_amount, payout to calculate sums
     const { data: sumsData, error: sumsErr } = await supabase
       .from('bets')
       .select('bet_amount, payout');
-    console.log('SUMS QUERY RESULT:', { sumsData, sumsErr });
-
-    if (sumsErr) throw sumsErr;
+    console.log('SUMS QUERY RESULT:', { hasData: !!sumsData, count: sumsData?.length });
+    if (sumsErr) {
+      console.error('SUMS QUERY DETAILED ERROR:', {
+        message: sumsErr.message,
+        code: sumsErr.code,
+        details: sumsErr.details,
+        hint: sumsErr.hint
+      });
+      throw new Error(`Bets sums query failed: [${sumsErr.code || 'NO_CODE'}] ${sumsErr.message || 'No message'}. Details: ${sumsErr.details || 'None'}`);
+    }
 
     let totalBetAmount = 0;
     let totalPayoutAmount = 0;
@@ -189,7 +212,10 @@ router.get('/users', adminAuth, async (req, res) => {
       .select('id, username, balance, created_at')
       .order('created_at', { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      console.error('Admin Users Query Error:', error);
+      throw new Error(`Users list query failed: [${error.code || 'NO_CODE'}] ${error.message || 'No message'}. Details: ${error.details || 'None'}`);
+    }
 
     return res.status(200).json({
       success: true,
@@ -224,7 +250,10 @@ router.get('/users/:userId/bets', adminAuth, async (req, res) => {
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      console.error('Admin User Bets Query Error:', error);
+      throw new Error(`User bets query failed: [${error.code || 'NO_CODE'}] ${error.message || 'No message'}. Details: ${error.details || 'None'}`);
+    }
 
     return res.status(200).json({
       success: true,
@@ -294,7 +323,10 @@ router.post('/users/:userId/adjust-balance', adminAuth, async (req, res) => {
       .update({ balance: newBalance })
       .eq('id', userId);
 
-    if (updateErr) throw updateErr;
+    if (updateErr) {
+      console.error('Admin Balance Update Error:', updateErr);
+      throw new Error(`Balance update failed: [${updateErr.code || 'NO_CODE'}] ${updateErr.message || 'No message'}. Details: ${updateErr.details || 'None'}`);
+    }
 
     // C. Audit log entry insert karein public.balance_adjustments table me
     const { error: adjustErr } = await supabase

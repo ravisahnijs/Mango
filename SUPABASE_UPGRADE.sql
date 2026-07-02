@@ -17,6 +17,21 @@ CREATE TABLE IF NOT EXISTS public.profiles (
 -- Enable RLS for Profiles (If not already enabled)
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 
+-- Allow users to select their own profile
+DROP POLICY IF EXISTS "Users can view their own profile" ON public.profiles;
+CREATE POLICY "Users can view their own profile" ON public.profiles
+  FOR SELECT USING (auth.uid() = id);
+
+-- Allow users to insert their own profile on registration
+DROP POLICY IF EXISTS "Users can insert their own profile" ON public.profiles;
+CREATE POLICY "Users can insert their own profile" ON public.profiles
+  FOR INSERT WITH CHECK (auth.uid() = id);
+
+-- Allow users to update their own profile (like faucet balance reset)
+DROP POLICY IF EXISTS "Users can update their own profile" ON public.profiles;
+CREATE POLICY "Users can update their own profile" ON public.profiles
+  FOR UPDATE USING (auth.uid() = id);
+
 -- Grant standard permissions on profiles
 GRANT SELECT, INSERT, UPDATE ON public.profiles TO authenticated, anon;
 
