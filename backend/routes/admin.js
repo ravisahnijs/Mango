@@ -88,7 +88,7 @@ router.post('/login', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Admin Login Error:', error.message);
+    console.error('Admin Login Error:', error.message, error.stack || error);
     return res.status(500).json({
       success: false,
       error: 'Server Error',
@@ -152,7 +152,7 @@ router.get('/dashboard', adminAuth, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Admin Dashboard API Error:', error.message);
+    console.error('Admin Dashboard API Error:', error.message, error.stack || error);
     return res.status(500).json({
       success: false,
       error: 'Server Error',
@@ -185,7 +185,7 @@ router.get('/users', adminAuth, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Admin Users API Error:', error.message);
+    console.error('Admin Users API Error:', error.message, error.stack || error);
     return res.status(500).json({
       success: false,
       error: 'Server Error',
@@ -220,7 +220,7 @@ router.get('/users/:userId/bets', adminAuth, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Admin User Bets API Error:', error.message);
+    console.error('Admin User Bets API Error:', error.message, error.stack || error);
     return res.status(500).json({
       success: false,
       error: 'Server Error',
@@ -295,7 +295,7 @@ router.post('/users/:userId/adjust-balance', adminAuth, async (req, res) => {
       });
 
     if (adjustErr) {
-      console.error('Audit entry failed but balance changed! error:', adjustErr.message);
+      console.error('Audit entry failed but balance changed! error:', adjustErr.message, adjustErr.stack || adjustErr);
     }
 
     return res.status(200).json({
@@ -307,7 +307,7 @@ router.post('/users/:userId/adjust-balance', adminAuth, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Admin Adjust Balance API Error:', error.message);
+    console.error('Admin Adjust Balance API Error:', error.message, error.stack || error);
     return res.status(500).json({
       success: false,
       error: 'Server Error',
