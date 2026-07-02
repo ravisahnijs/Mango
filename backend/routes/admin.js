@@ -9,6 +9,7 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { createClient } = require('@supabase/supabase-js');
+const fetch = require('cross-fetch');
 
 // Admin Auth Middleware ko import karte hain taaki routes ko protect kiya ja sake
 const adminAuth = require('../middleware/adminAuth');
@@ -19,7 +20,15 @@ const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 let supabase = null;
 if (supabaseUrl && supabaseServiceKey) {
-  supabase = createClient(supabaseUrl, supabaseServiceKey);
+  // cross-fetch explicitly pass kiya hai taaki Node/Render environments me requests fail na hon
+  supabase = createClient(supabaseUrl, supabaseServiceKey, {
+    auth: {
+      persistSession: false
+    },
+    global: {
+      fetch: fetch
+    }
+  });
 }
 
 /**
