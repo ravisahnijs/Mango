@@ -20,6 +20,10 @@ const adminRoutes = require('./routes/admin');
 
 const app = express();
 
+// Set 'trust proxy' to 1 so Express knows it is behind a reverse proxy (e.g. Render, Nginx, Cloudflare)
+// and can safely read the client's original IP from X-Forwarded-For headers for rate limiting.
+app.set('trust proxy', 1);
+
 // 1. HELMET SECURITY MIDDLEWARE
 // Yeh automatic bohot saare security HTTP headers apply kar deta hai jo hacker attacks (jaise XSS, Clickjacking) ko block karte hain.
 app.use(helmet());
