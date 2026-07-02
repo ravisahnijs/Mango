@@ -152,7 +152,7 @@ router.get('/dashboard', adminAuth, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Admin Dashboard API Error:', error.message, error.stack || error);
+    console.error('Admin Dashboard API Error - FULL:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
     return res.status(500).json({
       success: false,
       error: 'Server Error',
