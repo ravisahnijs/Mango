@@ -112,6 +112,7 @@ router.get('/dashboard', adminAuth, async (req, res) => {
     const { count: totalUsers, error: usersErr } = await supabase
       .from('profiles')
       .select('*', { count: 'exact', head: true });
+    console.log('USERS QUERY RESULT:', { totalUsers, usersErr });
 
     if (usersErr) throw usersErr;
 
@@ -119,6 +120,7 @@ router.get('/dashboard', adminAuth, async (req, res) => {
     const { count: totalBets, error: betsErr } = await supabase
       .from('bets')
       .select('*', { count: 'exact', head: true });
+    console.log('BETS QUERY RESULT:', { totalBets, betsErr });
 
     if (betsErr) throw betsErr;
 
@@ -126,6 +128,7 @@ router.get('/dashboard', adminAuth, async (req, res) => {
     const { data: sumsData, error: sumsErr } = await supabase
       .from('bets')
       .select('bet_amount, payout');
+    console.log('SUMS QUERY RESULT:', { sumsData, sumsErr });
 
     if (sumsErr) throw sumsErr;
 
