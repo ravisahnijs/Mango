@@ -11,6 +11,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const { createClient } = require('@supabase/supabase-js');
+const fetch = require('cross-fetch');
 
 // Apne custom banaye hue rate limiters import karte hain
 const { generalLimiter, betLimiter, adminLoginLimiter } = require('./middleware/rateLimiters');
@@ -65,8 +66,16 @@ const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 let supabase = null;
 if (supabaseUrl && supabaseServiceKey) {
   // Service role key use karke secure client banate hain (ye bypasses database Row Level Security)
-  supabase = createClient(supabaseUrl, supabaseServiceKey);
-  console.log('✅ Supabase client backend security credentials securely parsed.');
+  // cross-fetch explicitly pass kiya hai taaki Node/Render environments me requests fail na hon
+  supabase = createClient(supabaseUrl, supabaseServiceKey, {
+    auth: {
+      persistSession: false
+    },
+    global: {
+      fetch: fetch
+    }
+  });
+  console.log('✅ Supabase client backend security credentials securely parsed with custom fetch handler.');
 } else {
   console.warn('⚠️ Alert: Supabase URL ya Service Role Key env variables missing hain. SQL queries automatic fail hongi.');
 }
