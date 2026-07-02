@@ -28,7 +28,8 @@ module.exports = (req, res, next) => {
     }
 
     // Secret Key se token verify karte hain (secret key process.env.JWT_SECRET se aayegi)
-    const jwtSecret = process.env.JWT_SECRET;
+    const rawSecret = process.env.JWT_SECRET;
+    const jwtSecret = rawSecret ? rawSecret.trim() : null;
     if (!jwtSecret) {
       console.error('⚠️ ALERT: JWT_SECRET env variable configured nahi hai backend par!');
       return res.status(500).json({
@@ -38,16 +39,27 @@ module.exports = (req, res, next) => {
       });
     }
 
+    // EXTRA DEBUG LOGGING
+    console.log('[Admin Auth Middleware] Incoming Token validation activity...');
+    console.log(`[Admin Auth Middleware] Raw Token length: ${token.length} characters.`);
+    console.log(`[Admin Auth Middleware] Secret key length: ${jwtSecret.length} characters.`);
+    console.log(`[Admin Auth Middleware] Token preview: ${token.substring(0, 15)}...${token.substring(token.length - 15)}`);
+
     // Token verify aur decode karein
     const decoded = jwt.verify(token, jwtSecret);
     
+    console.log(`[Admin Auth Middleware] JWT successfully verified for admin: ${decoded.email}`);
+
     // Decoded payload ko req object me add karte hain taaki aage ke handlers isey use kar sakein
     req.admin = decoded;
 
     // Aage badho actual route controller handler par
     next();
   } catch (error) {
-    console.error('Admin Auth Middleware Error:', error.message);
+    console.error('❌ Admin Auth Middleware Error - Token Verification Failed!');
+    console.error('❌ Error Message:', error.message);
+    console.error('❌ Error Stack:', error.stack || error);
+    
     return res.status(401).json({
       success: false,
       error: 'Unauthorized',

@@ -60,25 +60,7 @@ app.use(generalLimiter);
 
 // 4. SUPABASE CLIENT INITIALIZATION (FOR BACKEND MIDDLEWARE SERVICES)
 // Agar hume backend se Supabase ke tables ya queries handle karni ho, toh ye secure admin connection hai.
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-let supabase = null;
-if (supabaseUrl && supabaseServiceKey) {
-  // Service role key use karke secure client banate hain (ye bypasses database Row Level Security)
-  // cross-fetch explicitly pass kiya hai taaki Node/Render environments me requests fail na hon
-  supabase = createClient(supabaseUrl, supabaseServiceKey, {
-    auth: {
-      persistSession: false
-    },
-    global: {
-      fetch: fetch
-    }
-  });
-  console.log('✅ Supabase client backend security credentials securely parsed with custom fetch handler.');
-} else {
-  console.warn('⚠️ Alert: Supabase URL ya Service Role Key env variables missing hain. SQL queries automatic fail hongi.');
-}
+const supabase = require('./supabaseClient');
 
 
 // 5. BACKEND ROUTES DEFINITIONS
