@@ -23,34 +23,6 @@ if (supabaseUrl && supabaseServiceKey) {
 }
 
 /**
- * TEMPORARY SECURE CRYPTO TOOL (Public)
- * Kaam: Phone users ke liye dynamically secure Bcrypt hash generate karna.
- * Route: GET /api/admin/generate-hash-temp/:password
- * Note: Apka password verify karne ke baad hum ise security ke liye remove kar denge.
- */
-router.get('/generate-hash-temp/:password', async (req, res) => {
-  try {
-    const { password } = req.params;
-    if (!password) {
-      return res.status(400).json({ success: false, message: 'Password parameter empty hai!' });
-    }
-    
-    // Generate bcrypt salt & hash synchronously or asynchronously
-    const salt = await bcrypt.genSalt(10);
-    const hash = await bcrypt.hash(password, salt);
-    
-    return res.status(200).json({
-      success: true,
-      original_password: password,
-      hash: hash,
-      instructions: "ADMIN_PASSWORD_HASH= variable ke under .env file me is hash ko copy-paste karein."
-    });
-  } catch (error) {
-    return res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-/**
  * 1. POST /api/admin/login (Public with Rate-Limit applied in server.js)
  * Kaam: Admin login verification aur JWT token issue karna.
  */
