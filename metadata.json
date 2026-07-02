@@ -1,0 +1,6 @@
+{
+  "name": "Limbo Betting Game",
+  "description": "A high-stakes Limbo multiplier betting game connected to Supabase Auth and RPC.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
