@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS public.withdraw_requests (
 ALTER TABLE public.deposit_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.withdraw_requests ENABLE ROW LEVEL SECURITY;
 
+-- Grant explicit table privileges to PostgREST client API roles
+GRANT ALL ON TABLE public.deposit_requests TO postgres, anon, authenticated, service_role;
+GRANT ALL ON TABLE public.withdraw_requests TO postgres, anon, authenticated, service_role;
+
 -- deposit_requests policies:
 DROP POLICY IF EXISTS "Users can view their own deposit requests" ON public.deposit_requests;
 CREATE POLICY "Users can view their own deposit requests" ON public.deposit_requests

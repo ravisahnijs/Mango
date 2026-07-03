@@ -68,7 +68,29 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
   const [selectedFiatCurrency, setSelectedFiatCurrency] = useState<string>("USD");
   const [isWalletDropdownOpen, setIsWalletDropdownOpen] = useState<boolean>(false);
   const [isWalletSettingsOpen, setIsWalletSettingsOpen] = useState<boolean>(false);
-  const [walletSettingsTab, setWalletSettingsTab] = useState<"overview" | "buy" | "swap">("overview");
+  const [walletSettingsTab, setWalletSettingsTab] = useState<"overview" | "buy" | "swap" | "deposit" | "withdraw">("overview");
+
+  // Deposit States
+  const [depositCurrency, setDepositCurrency] = useState<string>("USDT");
+  const [depositAmount, setDepositAmount] = useState<string>("");
+  const [depositUtr, setDepositUtr] = useState<string>("");
+  const [depositProofFile, setDepositProofFile] = useState<File | null>(null);
+  const [depositLoading, setDepositLoading] = useState<boolean>(false);
+  const [depositError, setDepositError] = useState<string | null>(null);
+  const [depositSuccess, setDepositSuccess] = useState<string | null>(null);
+
+  // Withdraw States
+  const [withdrawCurrency, setWithdrawCurrency] = useState<string>("USDT");
+  const [withdrawAmount, setWithdrawAmount] = useState<string>("");
+  const [withdrawPayoutDetails, setWithdrawPayoutDetails] = useState<string>("");
+  const [withdrawLoading, setWithdrawLoading] = useState<boolean>(false);
+  const [withdrawError, setWithdrawError] = useState<string | null>(null);
+  const [withdrawSuccess, setWithdrawSuccess] = useState<string | null>(null);
+
+  // User Requests History
+  const [myDeposits, setMyDeposits] = useState<any[]>([]);
+  const [myWithdrawals, setMyWithdrawals] = useState<any[]>([]);
+  const [loadingRequests, setLoadingRequests] = useState<boolean>(false);
 
   // Game input states
   const [betAmount, setBetAmount] = useState<number>(10.00);
@@ -164,10 +186,172 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
     localStorage.setItem("limbo_selected_fiat_currency", selectedFiatCurrency);
   }, [selectedFiatCurrency]);
 
+  const fetchMyRequests = async () => {
+    if (!supabase) return;
+    setLoadingRequests(true);
+    try {
+      const [depRes, witRes] = await Promise.all([
+        supabase
+          .from("deposit_requests")
+          .select("*")
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("withdraw_requests")
+          .select("*")
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: false })
+      ]);
+
+      if (depRes.data) setMyDeposits(depRes.data);
+      if (witRes.data) setMyWithdrawals(witRes.data);
+    } catch (e) {
+      console.error("Error fetching user transactions:", e);
+    } finally {
+      setLoadingRequests(false);
+    }
+  };
+
+  const handleDepositSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase || depositLoading) return;
+    setDepositError(null);
+    setDepositSuccess(null);
+
+    const amt = parseFloat(depositAmount);
+    if (isNaN(amt) || amt <= 0) {
+      setDepositError("Kripya ek valid deposit amount daalein!");
+      return;
+    }
+
+    if (!depositProofFile) {
+      setDepositError("Payment proof screenshot upload karna mandatory hai!");
+      return;
+    }
+
+    setDepositLoading(true);
+    try {
+      // 1. Upload proof file to payment-proofs bucket
+      const fileExt = depositProofFile.name.split('.').pop();
+      const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${fileExt}`;
+      const filePath = `${user.id}/${fileName}`;
+
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from("payment-proofs")
+        .upload(filePath, depositProofFile, {
+          cacheControl: "3600",
+          upsert: true
+        });
+
+      if (uploadError) {
+        throw new Error(`File upload failed: ${uploadError.message}`);
+      }
+
+      // 2. Insert into deposit_requests table
+      const { error: insertError } = await supabase
+        .from("deposit_requests")
+        .insert({
+          user_id: user.id,
+          currency_code: depositCurrency,
+          amount: amt,
+          proof_image_path: filePath,
+          utr_reference: depositUtr.trim() || null,
+          status: "pending"
+        });
+
+      if (insertError) {
+        throw new Error(`Deposit insert failed: ${insertError.message}`);
+      }
+
+      setDepositSuccess(`Deposit request of ${amt} ${depositCurrency} submitted successfully under pending status! Review typically takes 5-10 minutes.`);
+      setDepositAmount("");
+      setDepositUtr("");
+      setDepositProofFile(null);
+      
+      // Refresh requests history list
+      fetchMyRequests();
+
+    } catch (err: any) {
+      console.error(err);
+      setDepositError(err.message || "An error occurred while submitting deposit request.");
+    } finally {
+      setDepositLoading(false);
+    }
+  };
+
+  const handleWithdrawSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase || withdrawLoading) return;
+    setWithdrawError(null);
+    setWithdrawSuccess(null);
+
+    const amt = parseFloat(withdrawAmount);
+    if (isNaN(amt) || amt <= 0) {
+      setWithdrawError("Kripya ek valid withdrawal amount daalein!");
+      return;
+    }
+
+    const currentBal = balances[withdrawCurrency] ?? 0;
+    if (amt > currentBal) {
+      setWithdrawError(`Apke pass itna ${withdrawCurrency} balance nahi hai! Available: ${currentBal}`);
+      return;
+    }
+
+    if (!withdrawPayoutDetails.trim()) {
+      setWithdrawError("Payout details empty nahi ho sakti!");
+      return;
+    }
+
+    setWithdrawLoading(true);
+    try {
+      const { data, error } = await supabase.rpc("request_withdrawal", {
+        p_currency_code: withdrawCurrency,
+        p_amount: amt,
+        p_payout_details: withdrawPayoutDetails.trim()
+      });
+
+      if (error) throw error;
+
+      // Update local wallet balance with new balance returned from RPC response
+      const result = typeof data === "string" ? JSON.parse(data) : data;
+      const newBalance = Number(result?.new_balance);
+
+      if (!isNaN(newBalance)) {
+        setBalances(prev => ({
+          ...prev,
+          [withdrawCurrency]: newBalance
+        }));
+      } else {
+        // Fallback fetch balance if rpc return didn't have valid balance
+        fetchBalance();
+      }
+
+      setWithdrawSuccess(`Withdrawal request of ${amt} ${withdrawCurrency} placed successfully!`);
+      setWithdrawAmount("");
+      setWithdrawPayoutDetails("");
+
+      // Refresh requests history list
+      fetchMyRequests();
+
+    } catch (err: any) {
+      console.error(err);
+      setWithdrawError(err.message || "Error processing your withdrawal request.");
+    } finally {
+      setWithdrawLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isWalletSettingsOpen && user.id) {
+      fetchMyRequests();
+    }
+  }, [isWalletSettingsOpen, user.id]);
+
   // Initialize client seed and fetch balances & history on mount
   useEffect(() => {
     fetchBalance();
     fetchActiveSeeds();
+    fetchMyRequests();
 
     const savedHistory = localStorage.getItem(`limbo_history_${user.id}`);
     if (savedHistory) {
@@ -1651,8 +1835,12 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                   setWalletSettingsTab("overview");
                   setSwapError(null);
                   setSwapSuccess(null);
+                  setDepositError(null);
+                  setDepositSuccess(null);
+                  setWithdrawError(null);
+                  setWithdrawSuccess(null);
                 }}
-                className={`w-1/3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${walletSettingsTab === "overview" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
+                className={`w-1/5 py-2.5 text-[9px] md:text-xs font-bold uppercase tracking-wider transition text-center ${walletSettingsTab === "overview" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
               >
                 Overview
               </button>
@@ -1661,8 +1849,12 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                   setWalletSettingsTab("buy");
                   setSwapError(null);
                   setSwapSuccess(null);
+                  setDepositError(null);
+                  setDepositSuccess(null);
+                  setWithdrawError(null);
+                  setWithdrawSuccess(null);
                 }}
-                className={`w-1/3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${walletSettingsTab === "buy" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
+                className={`w-1/5 py-2.5 text-[9px] md:text-xs font-bold uppercase tracking-wider transition text-center ${walletSettingsTab === "buy" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
               >
                 Buy Crypto
               </button>
@@ -1671,10 +1863,42 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                   setWalletSettingsTab("swap");
                   setSwapError(null);
                   setSwapSuccess(null);
+                  setDepositError(null);
+                  setDepositSuccess(null);
+                  setWithdrawError(null);
+                  setWithdrawSuccess(null);
                 }}
-                className={`w-1/3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${walletSettingsTab === "swap" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
+                className={`w-1/5 py-2.5 text-[9px] md:text-xs font-bold uppercase tracking-wider transition text-center ${walletSettingsTab === "swap" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
               >
                 Coins Swap
+              </button>
+              <button
+                onClick={() => {
+                  setWalletSettingsTab("deposit");
+                  setSwapError(null);
+                  setSwapSuccess(null);
+                  setDepositError(null);
+                  setDepositSuccess(null);
+                  setWithdrawError(null);
+                  setWithdrawSuccess(null);
+                }}
+                className={`w-1/5 py-2.5 text-[9px] md:text-xs font-bold uppercase tracking-wider transition text-center ${walletSettingsTab === "deposit" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
+              >
+                Deposit
+              </button>
+              <button
+                onClick={() => {
+                  setWalletSettingsTab("withdraw");
+                  setSwapError(null);
+                  setSwapSuccess(null);
+                  setDepositError(null);
+                  setDepositSuccess(null);
+                  setWithdrawError(null);
+                  setWithdrawSuccess(null);
+                }}
+                className={`w-1/5 py-2.5 text-[9px] md:text-xs font-bold uppercase tracking-wider transition text-center ${walletSettingsTab === "withdraw" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
+              >
+                Withdraw
               </button>
             </div>
 
@@ -1894,6 +2118,226 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                     {swapLoading ? "Processing Swap Exchange..." : "Confirm Swap"}
                   </button>
 
+                </form>
+              )}
+
+              {/* Tab 4: Deposit (Manual Screenshot Verification) */}
+              {walletSettingsTab === "deposit" && (
+                <form onSubmit={handleDepositSubmit} className="space-y-4">
+                  {/* Select Currency */}
+                  <div>
+                    <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Select Deposit Currency</label>
+                    <select
+                      value={depositCurrency}
+                      onChange={(e) => setDepositCurrency(e.target.value)}
+                      className="w-full px-3 py-2 bg-[#0f1923] border border-[#2d4456] rounded-lg text-white font-medium text-xs focus:outline-none"
+                    >
+                      {SUPPORTED_ACTIVE_CURRENCIES.map(code => (
+                        <option key={code} value={code}>{code}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Deposit Amount */}
+                  <div>
+                    <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Deposit Amount ({depositCurrency})</label>
+                    <input
+                      type="number"
+                      step="any"
+                      placeholder="0.00"
+                      value={depositAmount}
+                      onChange={(e) => setDepositAmount(e.target.value)}
+                      className="w-full px-3 py-2 bg-[#0f1923] border border-[#2d4456] rounded-lg text-white font-mono text-xs focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  {/* Optional UTR Reference */}
+                  <div>
+                    <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Transaction UTR / Reference (Optional)</label>
+                    <input
+                      type="text"
+                      placeholder="Enter bank reference or UTR code"
+                      value={depositUtr}
+                      onChange={(e) => setDepositUtr(e.target.value)}
+                      className="w-full px-3 py-2 bg-[#0f1923] border border-[#2d4456] rounded-lg text-white font-mono text-xs focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Payment Proof Screenshot */}
+                  <div>
+                    <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Payment Proof Screenshot</label>
+                    <div className="relative group flex flex-col items-center justify-center border-2 border-dashed border-[#2d4456] rounded-xl p-4 bg-[#0f1923] hover:border-[#00e701] transition-all cursor-pointer">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0] || null;
+                          setDepositProofFile(file);
+                        }}
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                        required
+                      />
+                      <span className="text-[10px] text-gray-400 text-center font-bold uppercase">
+                        {depositProofFile ? `Selected: ${depositProofFile.name}` : "📁 Click or Drag & Drop screenshot here"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Error & Success Messages */}
+                  {depositError && (
+                    <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs rounded-lg">
+                      ⚠️ {depositError}
+                    </div>
+                  )}
+
+                  {depositSuccess && (
+                    <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-[#00e701] text-xs rounded-lg">
+                      🎉 {depositSuccess}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={depositLoading}
+                    className="w-full py-3 bg-[#00e701] hover:bg-[#1fff20] text-[#01080e] font-black text-xs uppercase rounded-lg transition-all"
+                  >
+                    {depositLoading ? "Uploading Screenshot & Requesting..." : "Submit Deposit Request"}
+                  </button>
+                  
+                  {/* My Deposits Section */}
+                  {loadingRequests ? (
+                    <div className="text-center text-xs text-gray-500 py-2">Loading transactions...</div>
+                  ) : (
+                    myDeposits.length > 0 && (
+                      <div className="mt-4 pt-4 border-t border-[#2d4456]/40">
+                        <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider block mb-2">My Deposits History</span>
+                        <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
+                          {myDeposits.map((dep) => (
+                            <div key={dep.id} className="p-2.5 bg-[#0f1923] rounded-lg border border-[#2d4456]/40 text-xs flex justify-between items-center">
+                              <div className="text-left">
+                                <span className="font-mono text-xs font-black text-white">{dep.amount} {dep.currency_code}</span>
+                                <span className="text-[9px] text-[#557086] block">UTR: {dep.utr_reference || "N/A"}</span>
+                                {dep.admin_note && <span className="text-[9px] text-rose-400 block mt-1">Note: {dep.admin_note}</span>}
+                              </div>
+                              <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-wider ${
+                                dep.status === "approved" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" :
+                                dep.status === "rejected" ? "bg-rose-500/10 text-rose-400 border border-rose-500/20" :
+                                "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                              }`}>
+                                {dep.status}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  )}
+                </form>
+              )}
+
+              {/* Tab 5: Withdraw */}
+              {walletSettingsTab === "withdraw" && (
+                <form onSubmit={handleWithdrawSubmit} className="space-y-4">
+                  {/* Select Currency */}
+                  <div>
+                    <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Select Withdraw Currency</label>
+                    <select
+                      value={withdrawCurrency}
+                      onChange={(e) => setWithdrawCurrency(e.target.value)}
+                      className="w-full px-3 py-2 bg-[#0f1923] border border-[#2d4456] rounded-lg text-white font-medium text-xs focus:outline-none"
+                    >
+                      {SUPPORTED_ACTIVE_CURRENCIES.map(code => (
+                        <option key={code} value={code}>{code} (Available: {(balances[code] ?? 0).toLocaleString("en-US", { maximumFractionDigits: 4 })})</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Withdraw Amount */}
+                  <div>
+                    <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Withdraw Amount ({withdrawCurrency})</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="0.00"
+                        value={withdrawAmount}
+                        onChange={(e) => setWithdrawAmount(e.target.value)}
+                        className="w-full px-3 py-2 bg-[#0f1923] border border-[#2d4456] rounded-lg text-white font-mono text-xs focus:outline-none"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setWithdrawAmount(String(balances[withdrawCurrency] ?? 0))}
+                        className="px-3 bg-[#2f4553] text-white hover:bg-[#3d5a6d] font-bold text-xs rounded-lg transition"
+                      >
+                        MAX
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Payout Details */}
+                  <div>
+                    <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Payout Details (UPI ID / Wallet Address)</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. upi_id@bank or crypto address"
+                      value={withdrawPayoutDetails}
+                      onChange={(e) => setWithdrawPayoutDetails(e.target.value)}
+                      className="w-full px-3 py-2 bg-[#0f1923] border border-[#2d4456] rounded-lg text-white font-mono text-xs focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  {/* Error & Success Messages */}
+                  {withdrawError && (
+                    <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs rounded-lg">
+                      ⚠️ {withdrawError}
+                    </div>
+                  )}
+
+                  {withdrawSuccess && (
+                    <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-[#00e701] text-xs rounded-lg">
+                      🎉 {withdrawSuccess}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={withdrawLoading}
+                    className="w-full py-3 bg-[#00e701] hover:bg-[#1fff20] text-[#01080e] font-black text-xs uppercase rounded-lg transition-all"
+                  >
+                    {withdrawLoading ? "Processing Withdrawal RPC..." : "Request Withdrawal"}
+                  </button>
+
+                  {/* My Withdrawals Section */}
+                  {loadingRequests ? (
+                    <div className="text-center text-xs text-gray-500 py-2">Loading transactions...</div>
+                  ) : (
+                    myWithdrawals.length > 0 && (
+                      <div className="mt-4 pt-4 border-t border-[#2d4456]/40">
+                        <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider block mb-2">My Withdrawals History</span>
+                        <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
+                          {myWithdrawals.map((wit) => (
+                            <div key={wit.id} className="p-2.5 bg-[#0f1923] rounded-lg border border-[#2d4456]/40 text-xs flex justify-between items-center">
+                              <div className="text-left">
+                                <span className="font-mono text-xs font-black text-white">{wit.amount} {wit.currency_code}</span>
+                                <span className="text-[9px] text-[#557086] block truncate max-w-[200px]">Details: {wit.payout_details}</span>
+                                {wit.admin_note && <span className="text-[9px] text-rose-400 block mt-1">Note: {wit.admin_note}</span>}
+                              </div>
+                              <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-wider ${
+                                wit.status === "approved" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" :
+                                wit.status === "rejected" ? "bg-rose-500/10 text-rose-400 border border-rose-500/20" :
+                                "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                              }`}>
+                                {wit.status}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  )}
                 </form>
               )}
 
