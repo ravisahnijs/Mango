@@ -6,6 +6,7 @@ export interface BetResult {
   nonce?: number;
   client_seed?: string;
   server_seed_hash?: string;
+  currency_code?: string;
 }
 
 export interface Profile {
@@ -21,4 +22,5 @@ export interface BetHistoryItem {
   result_multiplier: number;
   payout: number;
   is_win: boolean;
+  currency_code?: string;
 }

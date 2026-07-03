@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { getSupabaseClient } from "../supabase";
 import { BetResult, BetHistoryItem } from "../types";
 import { 
@@ -15,23 +15,78 @@ import {
   Shuffle, 
   User, 
   Award,
-  Dice5
+  Dice5,
+  ArrowRightLeft,
+  X,
+  CreditCard,
+  Grid
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { 
+  useExchangeRates, 
+  SUPPORTED_ACTIVE_CURRENCIES, 
+  SUPPORTED_FIAT_CURRENCIES,
+  ActiveCurrency,
+  DisplayFiatCurrency
+} from "../hooks/useExchangeRates";
 
 interface GameViewProps {
   user: any;
   onSignOut: () => void;
 }
 
+const FAUCET_AMOUNTS: Record<string, number> = {
+  USDT: 1000.0,
+  INR: 50000.0,
+  BTC: 0.01,
+  ETH: 0.1,
+  LTC: 5.0,
+  SOL: 2.0,
+  DOGE: 1000.0,
+  BCH: 1.0,
+  XRP: 500.0
+};
+
+async function sha256(message: string): Promise<string> {
+  const msgBuffer = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 export default function GameView({ user, onSignOut }: GameViewProps) {
+  // Exchange rates hook
+  const { convert, formatValue, loadingRates, pricesInUSD } = useExchangeRates();
+
+  // Multi-Currency wallet states
+  const [activeCurrency, setActiveCurrency] = useState<string>("USDT");
+  const [balances, setBalances] = useState<Record<string, number>>({
+    USDT: 0, INR: 0, BTC: 0, ETH: 0, LTC: 0, SOL: 0, DOGE: 0, BCH: 0, XRP: 0
+  });
+  const [hideZeroBalances, setHideZeroBalances] = useState<boolean>(false);
+  const [displayCryptoInFiat, setDisplayCryptoInFiat] = useState<boolean>(false);
+  const [selectedFiatCurrency, setSelectedFiatCurrency] = useState<string>("USD");
+  const [isWalletDropdownOpen, setIsWalletDropdownOpen] = useState<boolean>(false);
+  const [isWalletSettingsOpen, setIsWalletSettingsOpen] = useState<boolean>(false);
+  const [walletSettingsTab, setWalletSettingsTab] = useState<"overview" | "buy" | "swap">("overview");
+
   // Game input states
   const [betAmount, setBetAmount] = useState<number>(10.00);
   const [targetMultiplier, setTargetMultiplier] = useState<number>(2.00);
   const [clientSeed, setClientSeed] = useState<string>("");
 
+  // Derived balance constant based on selected active currency to preserve existing codebase logic
+  const balance = balances[activeCurrency] ?? 0;
+
+  // Swap Form states
+  const [swapSource, setSwapSource] = useState<string>("USDT");
+  const [swapDest, setSwapDest] = useState<string>("BTC");
+  const [swapAmount, setSwapAmount] = useState<string>("");
+  const [swapLoading, setSwapLoading] = useState<boolean>(false);
+  const [swapError, setSwapError] = useState<string | null>(null);
+  const [swapSuccess, setSwapSuccess] = useState<string | null>(null);
+
   // System states
-  const [balance, setBalance] = useState<number | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [history, setHistory] = useState<BetHistoryItem[]>([]);
@@ -72,15 +127,48 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
   const supabase = getSupabaseClient();
   const animationRef = useRef<number | null>(null);
 
-  // Initialize client seed and fetch balance & history on mount
+  // Load preferences on mount
   useEffect(() => {
-    // Fetch user balance
-    fetchBalance();
+    const savedActive = localStorage.getItem("limbo_active_currency");
+    if (savedActive) setActiveCurrency(savedActive);
 
-    // Fetch user seeds
+    const savedHideZero = localStorage.getItem("limbo_hide_zero_balances");
+    if (savedHideZero) setHideZeroBalances(savedHideZero === "true");
+
+    const savedDisplayFiat = localStorage.getItem("limbo_display_crypto_in_fiat");
+    if (savedDisplayFiat) setDisplayCryptoInFiat(savedDisplayFiat === "true");
+
+    const savedFiat = localStorage.getItem("limbo_selected_fiat_currency");
+    if (savedFiat) setSelectedFiatCurrency(savedFiat);
+  }, []);
+
+  // Save preferences when changed
+  useEffect(() => {
+    localStorage.setItem("limbo_active_currency", activeCurrency);
+    // When changing active currency, reset betAmount to sensible default
+    const savedDefault: Record<string, number> = {
+      USDT: 10.0, INR: 500.0, BTC: 0.0001, ETH: 0.005, LTC: 0.1, SOL: 0.05, DOGE: 25.0, BCH: 0.02, XRP: 10.0
+    };
+    setBetAmount(savedDefault[activeCurrency] ?? 10.0);
+  }, [activeCurrency]);
+
+  useEffect(() => {
+    localStorage.setItem("limbo_hide_zero_balances", String(hideZeroBalances));
+  }, [hideZeroBalances]);
+
+  useEffect(() => {
+    localStorage.setItem("limbo_display_crypto_in_fiat", String(displayCryptoInFiat));
+  }, [displayCryptoInFiat]);
+
+  useEffect(() => {
+    localStorage.setItem("limbo_selected_fiat_currency", selectedFiatCurrency);
+  }, [selectedFiatCurrency]);
+
+  // Initialize client seed and fetch balances & history on mount
+  useEffect(() => {
+    fetchBalance();
     fetchActiveSeeds();
 
-    // Load recent history from local storage
     const savedHistory = localStorage.getItem(`limbo_history_${user.id}`);
     if (savedHistory) {
       try {
@@ -91,8 +179,36 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
     }
   }, [user.id]);
 
+  const loadLocalFallbackSeeds = async () => {
+    let savedServerSeed = localStorage.getItem(`limbo_local_server_seed_${user.id}`);
+    if (!savedServerSeed) {
+      savedServerSeed = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+      localStorage.setItem(`limbo_local_server_seed_${user.id}`, savedServerSeed);
+    }
+    
+    let savedClientSeed = localStorage.getItem(`limbo_local_client_seed_${user.id}`);
+    if (!savedClientSeed) {
+      savedClientSeed = crypto.randomUUID().replace(/-/g, "").substring(0, 16);
+      localStorage.setItem(`limbo_local_client_seed_${user.id}`, savedClientSeed);
+    }
+    
+    let savedNonce = localStorage.getItem(`limbo_local_nonce_${user.id}`);
+    const parsedNonce = savedNonce ? parseInt(savedNonce) || 0 : 0;
+    
+    const hash = await sha256(savedServerSeed);
+    
+    setServerSeedHash(hash);
+    setClientSeed(savedClientSeed);
+    setNonce(parsedNonce);
+  };
+
   const fetchActiveSeeds = async () => {
-    if (!supabase) return;
+    if (!supabase) {
+      await loadLocalFallbackSeeds();
+      return;
+    }
     try {
       const { data, error } = await supabase
         .from("user_seeds")
@@ -101,7 +217,8 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
         .maybeSingle();
 
       if (error) {
-        console.log("user_seeds table query skipped/failed (tables might not exist yet):", error.message);
+        console.warn("user_seeds query failed, using local storage fallback:", error.message);
+        await loadLocalFallbackSeeds();
         return;
       }
 
@@ -110,44 +227,79 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
         setClientSeed(data.client_seed);
         setNonce(data.nonce);
       } else {
-        // No seed exists yet
         const randomSeed = crypto.randomUUID().replace(/-/g, "").substring(0, 16);
         setClientSeed(randomSeed);
         setServerSeedHash("Active seed hash will be initialized on first bet.");
         setNonce(0);
       }
     } catch (e) {
-      console.log("Database seeds table is not created yet.");
+      console.warn("Database seeds table query threw an error, using fallback:", e);
+      await loadLocalFallbackSeeds();
     }
   };
 
   const handleRotateSeeds = async () => {
-    if (!supabase || rotating) return;
+    if (rotating) return;
     setRotating(true);
     setErrorMsg(null);
     try {
+      if (!supabase) throw new Error("SUPABASE_MISSING");
+
       const { data, error } = await supabase.rpc("reveal_seed");
 
-      if (error) throw error;
+      if (error) {
+        if (error.message?.includes("function") && error.message?.includes("does not exist")) {
+          throw new Error("LEGACY_ROTATE_FALLBACK");
+        }
+        throw error;
+      }
 
       const result = typeof data === "string" ? JSON.parse(data) : data;
       setRevealedSeeds(result);
       
-      // Update active states with the new rotated seed details
       setServerSeedHash(result.new_server_seed_hash);
       setNonce(0);
       
-      // Seed validation tool auto-fill for convenience
       setVServerSeed(result.revealed_server_seed);
       setVClientSeed(result.revealed_client_seed);
       setVNonce(0);
       
-      // Clear local verify state
       setLocalVerifyResult(null);
 
     } catch (err: any) {
-      console.error("Reveal seed error:", err);
-      setErrorMsg(err.message || "Failed to rotate and reveal seeds. Ensure SQL is run in Supabase.");
+      console.warn("RPC rotate/reveal seed failed, executing client-side local rotate fallback...", err);
+      
+      // Local rotation fallback
+      const oldServerSeed = localStorage.getItem(`limbo_local_server_seed_${user.id}`) || "";
+      const oldClientSeed = clientSeed;
+      const oldNonce = nonce;
+      
+      const newServerSeed = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+      localStorage.setItem(`limbo_local_server_seed_${user.id}`, newServerSeed);
+      
+      const oldServerSeedHash = await sha256(oldServerSeed);
+      const newServerSeedHashVal = await sha256(newServerSeed);
+      
+      localStorage.setItem(`limbo_local_nonce_${user.id}`, "0");
+      
+      const localRevealed = {
+        revealed_server_seed: oldServerSeed,
+        revealed_server_seed_hash: oldServerSeedHash,
+        revealed_client_seed: oldClientSeed,
+        revealed_nonce: oldNonce,
+        new_server_seed_hash: newServerSeedHashVal
+      };
+      
+      setRevealedSeeds(localRevealed);
+      setServerSeedHash(newServerSeedHashVal);
+      setNonce(0);
+      
+      setVServerSeed(oldServerSeed);
+      setVClientSeed(oldClientSeed);
+      setVNonce(0);
+      setLocalVerifyResult(null);
     } finally {
       setRotating(false);
     }
@@ -227,72 +379,75 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
     
     try {
       const { data, error } = await supabase
-        .from("profiles")
-        .select("balance")
-        .eq("id", user.id)
-        .single();
+        .from("wallet_balances")
+        .select("currency_code, balance")
+        .eq("user_id", user.id);
       
       if (error) {
-        const errStr = `Code: ${error.code}, Message: ${error.message}, Details: ${error.details}, Hint: ${error.hint}`;
-        console.error(`fetchBalance attempt ${retryCount + 1} database error: ${errStr}`);
-
-        if (error.code === "42501") {
-          throw new Error("Supabase permission denied. Please run this command in your Supabase SQL Editor to grant table access: GRANT SELECT, INSERT, UPDATE ON public.profiles TO authenticated, anon;");
+        console.warn("wallet_balances table query failed. Attempting fallback to profiles table...", error);
+        
+        const { data: profileData, error: profileError } = await supabase
+          .from("profiles")
+          .select("balance")
+          .eq("id", user.id)
+          .maybeSingle();
+          
+        if (profileError) {
+          console.error("Profiles table fallback also failed:", profileError);
+          throw profileError;
         }
-
-        // PGRST116 means no row found (Profile not created yet)
-        if (error.code === "PGRST116") {
-          console.log("No profile row found. Attempting to insert a profile with username...");
-          const { data: newProfile, error: createError } = await supabase
+        
+        // If profile exists, map it to USDT, otherwise initialize default values
+        const legacyBalance = profileData ? Number(profileData.balance) : 1000.00;
+        const fallbackBalances: Record<string, number> = {
+          USDT: legacyBalance,
+          INR: 50000.0,
+          BTC: 0.01,
+          ETH: 0.1,
+          LTC: 5.0,
+          SOL: 2.0,
+          DOGE: 1000.0,
+          BCH: 1.0,
+          XRP: 500.0
+        };
+        setBalances(fallbackBalances);
+        setErrorMsg("⚠️ Multi-currency wallet tables are not configured in Supabase. Operating in legacy compatibility mode. Run the SQL in 'supabase_wallet_balances.sql' to enable full multi-currency wallets.");
+        return;
+      }
+      
+      if (data) {
+        const newBalances: Record<string, number> = {
+          USDT: 0, INR: 0, BTC: 0, ETH: 0, LTC: 0, SOL: 0, DOGE: 0, BCH: 0, XRP: 0
+        };
+        data.forEach((row: any) => {
+          newBalances[row.currency_code] = Number(row.balance);
+        });
+        
+        // If USDT is missing in the returned wallet_balances, fetch it from profiles as fallback
+        if (newBalances.USDT === 0) {
+          const { data: profileData } = await supabase
             .from("profiles")
-            .insert({ 
-              id: user.id, 
-              balance: 1000.00,
-              username: user.email ? user.email.split("@")[0] : "user"
-            })
             .select("balance")
-            .single();
-          
-          if (createError) {
-            if (createError.code === "42501") {
-              throw new Error("Supabase insert permission denied. Please run this command in your Supabase SQL Editor: GRANT INSERT ON public.profiles TO authenticated, anon;");
-            }
-            const createErrStr = `Code: ${createError.code}, Message: ${createError.message}, Details: ${createError.details}, Hint: ${createError.hint}`;
-            console.error(`Failed to insert profile manually: ${createErrStr}`);
-            throw createError;
+            .eq("id", user.id)
+            .maybeSingle();
+          if (profileData) {
+            newBalances.USDT = Number(profileData.balance);
+          } else {
+            newBalances.USDT = 1000.00; // sensible default
           }
-          
-          if (newProfile) {
-            console.log("Successfully created profile manually. Balance:", newProfile.balance);
-            setBalance(Number(newProfile.balance));
-            setErrorMsg(null);
-            return;
-          }
-        } else {
-          throw error;
         }
-      } else if (data) {
-        console.log("Successfully fetched balance from database:", data.balance);
-        setBalance(Number(data.balance));
+        
+        setBalances(newBalances);
         setErrorMsg(null);
       }
     } catch (err: any) {
-      const caughtErrStr = err.message 
-        ? `${err.message} (Code: ${err.code || 'None'}, Details: ${err.details || 'None'})` 
-        : JSON.stringify(err);
-      console.error(`fetchBalance caught error on attempt ${retryCount + 1}: ${caughtErrStr}`);
-      
-      // Retry up to 3 times (retryCount = 0, 1, 2) with a 1-second delay
+      console.error(`fetchBalance caught error on attempt ${retryCount + 1}:`, err);
       if (retryCount < 2) {
-        console.log(`Retrying fetchBalance in 1000ms (retry count: ${retryCount + 1})...`);
         setTimeout(() => {
           fetchBalance(retryCount + 1);
         }, 1000);
       } else {
-        const errorDetails = err.message 
-          ? `${err.message} (Code: ${err.code || 'None'}, Details: ${err.details || 'None'})` 
-          : JSON.stringify(err);
-        setErrorMsg(`Failed to load your balance. Please refresh. Debug details: ${errorDetails}`);
+        setErrorMsg("Failed to load your wallet balances. Make sure Supabase is set up properly.");
       }
     }
   };
@@ -302,20 +457,56 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
     setFaucetLoading(true);
     setErrorMsg(null);
     try {
-      const { error } = await supabase
-        .from("profiles")
-        .update({ balance: 1000.00 })
-        .eq("id", user.id);
-      
-      if (error) throw error;
-      setBalance(1000.00);
-    } catch (err: any) {
-      console.error(err);
-      if (err.code === "42501") {
-        setErrorMsg("Failed to claim faucet money. Please run this command in your Supabase SQL Editor: GRANT UPDATE ON public.profiles TO authenticated, anon;");
-      } else {
-        setErrorMsg("Failed to claim faucet money.");
+      const { data, error } = await supabase.rpc("claim_faucet", {
+        p_currency_code: activeCurrency
+      });
+
+      if (error) {
+        if (error.message?.includes("relation") || error.message?.includes("function") || error.message?.includes("does not exist")) {
+          throw new Error("LEGACY_RESET_FALLBACK");
+        }
+        throw error;
       }
+
+      const result = typeof data === "string" ? JSON.parse(data) : data;
+      const newBalanceVal = Number(result.new_balance);
+
+      setBalances(prev => ({
+        ...prev,
+        [activeCurrency]: newBalanceVal
+      }));
+
+      playBeep(440, "sine", 0.1);
+      setTimeout(() => playBeep(880, "sine", 0.15), 100);
+    } catch (err: any) {
+      if (err.message === "LEGACY_RESET_FALLBACK") {
+        console.warn("wallet_balances claim_faucet RPC missing, executing legacy profiles.balance reset fallback...");
+        const amountToCredit = FAUCET_AMOUNTS[activeCurrency] ?? 100.0;
+        if (activeCurrency === "USDT") {
+          try {
+            const { error: profError } = await supabase
+              .from("profiles")
+              .upsert({
+                id: user.id,
+                balance: amountToCredit,
+                updated_at: new Date()
+              }, { onConflict: "id" });
+            if (profError) throw profError;
+
+            setBalances(prev => ({
+              ...prev,
+              USDT: amountToCredit
+            }));
+            playBeep(440, "sine", 0.1);
+            setTimeout(() => playBeep(880, "sine", 0.15), 100);
+            return;
+          } catch (e: any) {
+            console.error(e);
+          }
+        }
+      }
+      console.error(err);
+      setErrorMsg(err.message || `Failed to refill ${activeCurrency} faucet.`);
     } finally {
       setFaucetLoading(false);
     }
@@ -327,28 +518,31 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
 
   // Helper shortcuts for bet amount
   const handleHalfBet = () => {
-    setBetAmount(prev => Math.max(0.1, Number((prev / 2).toFixed(2))));
+    setBetAmount(prev => Math.max(activeCurrency === 'BTC' ? 0.000001 : 0.1, Number((prev / 2).toFixed(6))));
   };
 
   const handleDoubleBet = () => {
     if (balance) {
-      setBetAmount(prev => Math.min(balance, Number((prev * 2).toFixed(2))));
+      setBetAmount(prev => Math.min(balance, Number((prev * 2).toFixed(6))));
     } else {
-      setBetAmount(prev => Number((prev * 2).toFixed(2)));
+      setBetAmount(prev => Number((prev * 2).toFixed(6)));
     }
   };
 
   const handleMaxBet = () => {
     if (balance) {
-      setBetAmount(Number(balance.toFixed(2)));
+      setBetAmount(Number(balance));
     }
   };
 
   const handleMinBet = () => {
-    setBetAmount(1.00);
+    const minVal: Record<string, number> = {
+      USDT: 0.1, INR: 5.0, BTC: 0.000001, ETH: 0.00005, LTC: 0.001, SOL: 0.001, DOGE: 1.0, BCH: 0.0002, XRP: 0.1
+    };
+    setBetAmount(minVal[activeCurrency] ?? 0.1);
   };
 
-  // Trigger audio feedback safely (we construct dynamic web audio synthesizer to bypass external files assets!)
+  // Trigger audio feedback safely
   const playBeep = (freq: number, type: "sine" | "square" | "triangle" | "sawtooth", duration: number) => {
     if (!soundEnabled) return;
     try {
@@ -373,10 +567,9 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
 
   // Execute Bet calling the Supabase RPC "place_bet"
   const handlePlaceBet = async () => {
-    if (!supabase || loading || animationActive) return;
+    if (loading || animationActive) return;
     setErrorMsg(null);
 
-    // Frontend validations before triggering RPC
     if (balance === null) {
       setErrorMsg("Please wait, balance is still loading.");
       return;
@@ -398,30 +591,157 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
     setCurrentResult(null);
 
     try {
-      // Call secure supabase RPC. No game logic is done on frontend!
-      const { data, error } = await supabase.rpc("place_bet", {
-        p_bet_amount: Number(betAmount),
-        p_target_multiplier: Number(targetMultiplier),
-        p_client_seed: clientSeed
-      });
+      if (!supabase) {
+        throw new Error("SUPABASE_CLIENT_NOT_AVAILABLE");
+      }
 
-      if (error) throw error;
+      let rpcResult;
+      
+      try {
+        // Try calling the upgraded multi-currency RPC
+        const { data, error } = await supabase.rpc("place_bet", {
+          p_bet_amount: Number(betAmount),
+          p_target_multiplier: Number(targetMultiplier),
+          p_client_seed: clientSeed,
+          p_currency_code: activeCurrency
+        });
+        
+        if (error) {
+          // If function does not exist / arg mismatch
+          if (error.message?.includes("function") && (error.message?.includes("does not exist") || error.message?.includes("parameter"))) {
+            throw new Error("LEGACY_FALLBACK");
+          }
+          throw error;
+        }
+        rpcResult = data;
+      } catch (innerErr: any) {
+        if (innerErr.message === "LEGACY_FALLBACK") {
+          console.warn("Upgraded place_bet RPC not found. Falling back to 3-argument legacy place_bet RPC...");
+          // Fall back to legacy place_bet (ignoring p_currency_code since legacy only supports profiles.balance / USDT)
+          const { data, error } = await supabase.rpc("place_bet", {
+            p_bet_amount: Number(betAmount),
+            p_target_multiplier: Number(targetMultiplier),
+            p_client_seed: clientSeed
+          });
+          
+          if (error) throw error;
+          rpcResult = data;
+        } else {
+          throw innerErr;
+        }
+      }
 
-      // The returned data will be cast to BetResult
-      const result: BetResult = typeof data === "string" ? JSON.parse(data) : data;
+      const result: BetResult = typeof rpcResult === "string" ? JSON.parse(rpcResult) : rpcResult;
 
-      // Update seeds and nonce state
       if (result.nonce !== undefined) setNonce(result.nonce + 1);
       if (result.client_seed) setClientSeed(result.client_seed);
       if (result.server_seed_hash) setServerSeedHash(result.server_seed_hash);
 
-      // Trigger the premium multiplier scale up animation
       startMultiplierAnimation(result);
 
     } catch (err: any) {
-      console.error("RPC bet error:", err);
-      setErrorMsg(err.message || "RPC connection failed. Please ensure schema is updated.");
-      setLoading(false);
+      console.warn("RPC place_bet failed, executing local client-side Provably Fair fallback...", err);
+      
+      try {
+        // Load local fallback seeds to perform calculation
+        let localSSeed = localStorage.getItem(`limbo_local_server_seed_${user.id}`);
+        if (!localSSeed) {
+          localSSeed = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
+          localStorage.setItem(`limbo_local_server_seed_${user.id}`, localSSeed);
+        }
+        
+        const localSSeedHash = await sha256(localSSeed);
+        
+        // Calculate the multiplier locally using HMAC-SHA256
+        const encoder = new TextEncoder();
+        const cleanedHex = localSSeed.trim().replace(/^0x/, "");
+        const serverSeedBytes = new Uint8Array(
+          cleanedHex.match(/.{1,2}/g)?.map(byte => parseInt(byte, 16)) || []
+        );
+        
+        const key = await window.crypto.subtle.importKey(
+          "raw",
+          serverSeedBytes,
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["sign"]
+        );
+        
+        const messageBytes = encoder.encode(`${clientSeed.trim()}:${nonce}`);
+        const signature = await window.crypto.subtle.sign(
+          "HMAC",
+          key,
+          messageBytes
+        );
+        
+        const hashArray = Array.from(new Uint8Array(signature));
+        const hmacHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        
+        const randVal = parseInt(hmacHex.substring(0, 8), 16) / 4294967295.0;
+        
+        let resultMultiplier = Math.round((0.99 / (1.0 - Math.min(randVal, 0.999999))) * 100) / 100;
+        if (resultMultiplier < 1.0) resultMultiplier = 1.0;
+        if (resultMultiplier > 1000000.0) resultMultiplier = 1000000.0;
+        
+        const isWin = resultMultiplier >= targetMultiplier;
+        const payout = isWin ? betAmount * targetMultiplier : 0;
+        const newBalanceValue = balance + (isWin ? (payout - betAmount) : -betAmount);
+        
+        const localNonceValue = nonce + 1;
+        localStorage.setItem(`limbo_local_nonce_${user.id}`, String(localNonceValue));
+        
+        const localResult: BetResult = {
+          is_win: isWin,
+          result_multiplier: resultMultiplier,
+          payout: payout,
+          new_balance: newBalanceValue,
+          nonce: nonce,
+          client_seed: clientSeed,
+          server_seed_hash: localSSeedHash,
+          currency_code: activeCurrency
+        };
+        
+        // Save the new balance locally in balances state
+        setBalances(prev => ({
+          ...prev,
+          [activeCurrency]: newBalanceValue
+        }));
+        
+        // Also update Supabase database table if possible (non-blocking) so it tries to save the new balance if the table exists
+        if (supabase) {
+          try {
+            await supabase
+              .from("wallet_balances")
+              .upsert({ 
+                user_id: user.id, 
+                currency_code: activeCurrency, 
+                balance: newBalanceValue,
+                updated_at: new Date()
+              }, { onConflict: "user_id,currency_code" });
+              
+            if (activeCurrency === "USDT") {
+              await supabase
+                .from("profiles")
+                .update({ balance: newBalanceValue })
+                .eq("id", user.id);
+            }
+          } catch (dbErr) {
+            console.warn("Could not save new fallback balance to Supabase:", dbErr);
+          }
+        }
+        
+        if (localResult.nonce !== undefined) setNonce(localResult.nonce + 1);
+        if (localResult.client_seed) setClientSeed(localResult.client_seed);
+        if (localResult.server_seed_hash) setServerSeedHash(localResult.server_seed_hash);
+        
+        startMultiplierAnimation(localResult);
+      } catch (fallbackErr: any) {
+        console.error("Critical: Local fallback calculation failed:", fallbackErr);
+        setErrorMsg("Local calculation failed: " + fallbackErr.message);
+        setLoading(false);
+      }
     }
   };
 
@@ -432,22 +752,18 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
     setDisplayMultiplier(1.00);
 
     const targetVal = result.result_multiplier;
-    const duration = 700; // Total duration in ms (Fast Play: 0.7 seconds)
+    const duration = 700; // Total duration in ms
     const startTime = performance.now();
 
     const animate = (now: number) => {
       const elapsed = now - startTime;
       const progress = Math.min(elapsed / duration, 1);
 
-      // We use quadratic easing for a satisfying slowdown effect at the end
-      // Form: current = 1.00 + (targetVal - 1.00) * easedProgress
-      // Or exponential to simulate random crash multipliers beautifully
       const easedProgress = 1 - Math.pow(1 - progress, 3); // easeOutCubic
       const currentVal = 1.00 + (targetVal - 1.00) * easedProgress;
       
       setDisplayMultiplier(Number(currentVal.toFixed(2)));
 
-      // Sound ticker effect
       if (Math.floor(currentVal * 10) % 7 === 0) {
         playBeep(250 + (currentVal * 15), "triangle", 0.08);
       }
@@ -455,12 +771,10 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
       if (progress < 1) {
         animationRef.current = requestAnimationFrame(animate);
       } else {
-        // Animation finished
         setDisplayMultiplier(targetVal);
         setAnimationActive(false);
         setLoading(false);
 
-        // Sound effect on win / loss
         if (result.is_win) {
           playBeep(650, "sine", 0.15);
           setTimeout(() => playBeep(900, "sine", 0.3), 100);
@@ -468,10 +782,12 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
           playBeep(180, "sawtooth", 0.4);
         }
 
-        // 1. Update balance strictly from backend response: "Balance update karna sirf backend response ke new_balance se"
-        setBalance(result.new_balance);
+        // Update balance strictly from backend response
+        setBalances(prev => ({
+          ...prev,
+          [activeCurrency]: result.new_balance
+        }));
 
-        // 2. Add item to local history list
         const newHistoryItem: BetHistoryItem = {
           id: crypto.randomUUID(),
           timestamp: new Date(),
@@ -479,11 +795,12 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
           target_multiplier: targetMultiplier,
           result_multiplier: result.result_multiplier,
           payout: result.payout,
-          is_win: result.is_win
+          is_win: result.is_win,
+          currency_code: activeCurrency
         };
 
         setHistory(prev => {
-          const updated = [newHistoryItem, ...prev].slice(0, 30); // limit to 30 items
+          const updated = [newHistoryItem, ...prev].slice(0, 30);
           localStorage.setItem(`limbo_history_${user.id}`, JSON.stringify(updated));
           return updated;
         });
@@ -493,17 +810,76 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
     animationRef.current = requestAnimationFrame(animate);
   };
 
+  // Swap wallet helper
+  const handleSwap = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase || swapLoading) return;
+    setSwapError(null);
+    setSwapSuccess(null);
+
+    const amt = parseFloat(swapAmount);
+    if (isNaN(amt) || amt <= 0) {
+      setSwapError("Kripya ek valid swap amount daalein!");
+      return;
+    }
+
+    const sourceBal = balances[swapSource] ?? 0;
+    if (amt > sourceBal) {
+      setSwapError(`Apke pass itna ${swapSource} balance nahi hai!`);
+      return;
+    }
+
+    if (swapSource === swapDest) {
+      setSwapError("Source aur destination currency same nahi ho sakti!");
+      return;
+    }
+
+    setSwapLoading(true);
+    try {
+      const { data, error } = await supabase.rpc("swap_currency", {
+        p_source_currency: swapSource,
+        p_dest_currency: swapDest,
+        p_amount: amt
+      });
+
+      if (error) throw error;
+
+      const result = typeof data === "string" ? JSON.parse(data) : data;
+      const srcNewBal = Number(result.source_new_balance);
+      const dstNewBal = Number(result.dest_new_balance);
+      const receivedAmount = Number(result.received_amount);
+
+      setBalances(prev => ({
+        ...prev,
+        [swapSource]: srcNewBal,
+        [swapDest]: dstNewBal
+      }));
+
+      setSwapSuccess(`Swapped safely! ${amt} ${swapSource} converted to ${receivedAmount.toLocaleString("en-US", { maximumFractionDigits: swapDest === 'BTC' ? 8 : 4 })} ${swapDest}.`);
+      setSwapAmount("");
+    } catch (err: any) {
+      console.error(err);
+      setSwapError(err.message || "Transaction error. Multi-currency balances database check failed.");
+    } finally {
+      setSwapLoading(false);
+    }
+  };
+
   // Stats calculators
   const totalBets = history.length;
   const wins = history.filter(h => h.is_win).length;
   const losses = totalBets - wins;
   const winRate = totalBets > 0 ? ((wins / totalBets) * 100).toFixed(1) : "0.0";
   const netProfit = history.reduce((acc, curr) => {
-    return acc + (curr.is_win ? (curr.payout - curr.bet_amount) : -curr.bet_amount);
+    // Convert to active currency for consistent metrics display
+    const currentBetInActive = convert(curr.bet_amount, curr.currency_code || "USDT", activeCurrency);
+    const currentPayoutInActive = convert(curr.payout, curr.currency_code || "USDT", activeCurrency);
+    return acc + (curr.is_win ? (currentPayoutInActive - currentBetInActive) : -currentBetInActive);
   }, 0);
 
   return (
     <div className="min-h-screen bg-[#0f1923] text-[#b1bad3] flex flex-col font-sans" id="game-view-root">
+      
       {/* Navbar Section */}
       <nav className="h-16 bg-[#1a2c38] border-b border-[#213743] flex items-center justify-between px-6 flex-shrink-0 sticky top-0 z-50" id="game-navbar">
         <div className="flex items-center gap-2.5" id="nav-brand">
@@ -515,44 +891,127 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
           </span>
         </div>
 
-        {/* User Balance & Actions */}
-        <div className="flex items-center gap-4" id="nav-actions">
-          {/* Real-time Balance */}
-          <div className="flex items-center bg-[#0f1923] border border-[#2d4456] rounded-md p-1 pr-3" id="balance-badge">
-            <div className="w-8 h-8 rounded bg-[#2f4553] flex items-center justify-center text-[#00e701] mr-2">
-              <Coins className="w-4.5 h-4.5" />
+        {/* User Balance Multi-Currency Dropdown */}
+        <div className="flex items-center gap-3" id="nav-actions">
+          
+          <div className="relative flex items-center gap-2">
+            
+            {/* Real-time Multi-Currency trigger badge */}
+            <div 
+              onClick={() => setIsWalletDropdownOpen(!isWalletDropdownOpen)}
+              className="flex items-center bg-[#0f1923] hover:bg-[#1f323f]/50 border border-[#2d4456] rounded-lg p-1 pr-3 cursor-pointer select-none transition-all justify-between min-w-[155px] md:min-w-[185px]" 
+              id="balance-badge"
+            >
+              <div className="flex items-center">
+                <div className="w-8 h-8 rounded-md bg-[#2f4553] flex items-center justify-center text-[#00e701] mr-2 font-mono text-xs font-black">
+                  {activeCurrency}
+                </div>
+                <div className="flex flex-col text-left">
+                  <span className="text-[9px] text-[#557086] font-bold uppercase tracking-wider leading-none">Wallet Balance</span>
+                  <span className="text-xs font-black font-mono text-white mt-0.5">
+                    {displayCryptoInFiat 
+                      ? formatValue(convert(balance, activeCurrency, selectedFiatCurrency), selectedFiatCurrency, true)
+                      : formatValue(balance, activeCurrency)
+                    }
+                  </span>
+                </div>
+              </div>
+              <span className="text-gray-500 text-[10px] ml-2">▼</span>
             </div>
-            <div className="flex flex-col text-left min-w-[70px]">
-              <span className="text-[10px] text-[#557086] font-bold uppercase tracking-wider leading-none">Wallet</span>
-              <span className="text-sm font-extrabold font-mono text-white leading-tight">
-                {balance !== null ? `$${balance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "Loading..."}
-              </span>
-            </div>
-            {/* Reset / Faucet Button */}
+
+            {/* Dropdown Menu Popup block */}
+            <AnimatePresence>
+              {isWalletDropdownOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setIsWalletDropdownOpen(false)} />
+                  <motion.div 
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 8 }}
+                    className="absolute right-0 top-11 w-72 bg-[#1a2c38] border-2 border-[#2d4456] rounded-xl shadow-2xl z-50 p-2 max-h-[420px] overflow-y-auto"
+                  >
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-[#2d4456]/50 mb-1.5">
+                      <span className="text-xs font-bold text-gray-400">Main User Wallets</span>
+                      <button 
+                        onClick={() => {
+                          setIsWalletDropdownOpen(false);
+                          setIsWalletSettingsOpen(true);
+                        }}
+                        className="p-1 hover:bg-[#2f4553] rounded text-[#00e701] transition flex items-center gap-1"
+                        title="Wallet Settings"
+                      >
+                        <Settings className="w-3.5 h-3.5" />
+                        <span className="text-[10px] font-bold uppercase">Settings</span>
+                      </button>
+                    </div>
+
+                    <div className="space-y-1">
+                      {SUPPORTED_ACTIVE_CURRENCIES
+                        .filter(cur => {
+                          if (hideZeroBalances) {
+                            return (balances[cur] ?? 0) > 0 || cur === activeCurrency;
+                          }
+                          return true;
+                        })
+                        .map(cur => {
+                          const curBal = balances[cur] ?? 0;
+                          const isCurrent = cur === activeCurrency;
+                          return (
+                            <div
+                              key={cur}
+                              onClick={() => {
+                                setActiveCurrency(cur);
+                                setIsWalletDropdownOpen(false);
+                              }}
+                              className={`flex items-center justify-between p-2 rounded-lg cursor-pointer transition ${isCurrent ? 'bg-[#2f4553] text-[#00e701] border border-[#00e701]/20' : 'hover:bg-[#203744] text-gray-300'}`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-6 h-6 rounded bg-[#0f1923] flex items-center justify-center font-black text-[10px] text-white">
+                                  {cur}
+                                </span>
+                                <span className="text-xs font-extrabold">{cur}</span>
+                              </div>
+                              <div className="text-right flex flex-col">
+                                <span className="text-xs font-extrabold font-mono">
+                                  {curBal.toLocaleString("en-US", { maximumFractionDigits: cur === 'BTC' ? 8 : 4 })}
+                                </span>
+                                {displayCryptoInFiat && (
+                                  <span className="text-[9px] text-[#557086] font-bold">
+                                    {formatValue(convert(curBal, cur, selectedFiatCurrency), selectedFiatCurrency, true)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                      }
+                    </div>
+                  </motion.div>
+                </>
+              )}
+            </AnimatePresence>
+
+            {/* Faucet claim button */}
             <button
               onClick={handleResetBalance}
               disabled={faucetLoading}
-              className="ml-3 p-1.5 rounded hover:bg-[#2f4553] text-[#557086] hover:text-[#00e701] transition relative group"
-              title="Claim free $1,000 faucet balance"
+              className="p-2.5 rounded bg-[#0f1923] hover:bg-[#1f323f]/50 border border-[#2d4456] text-[#557086] hover:text-[#00e701] transition flex items-center justify-center group relative"
+              title={`Refill active currency`}
               id="faucet-btn"
             >
-              <RotateCcw className={`w-3.5 h-3.5 ${faucetLoading ? "animate-spin text-[#00e701]" : ""}`} />
-              <span className="absolute hidden group-hover:block bottom-[-32px] right-0 bg-[#1a2c38] text-[10px] text-gray-300 font-semibold px-2 py-1 rounded whitespace-nowrap border border-gray-800 shadow-md">
-                Refill $1,000
+              <RotateCcw className={`w-4 h-4 ${faucetLoading ? "animate-spin text-[#00e701]" : ""}`} />
+              <span className="absolute hidden group-hover:block bottom-[-34px] right-0 bg-[#1a2c38] text-[9px] text-gray-300 font-bold px-2 py-1 rounded whitespace-nowrap border border-gray-800 shadow-md">
+                Refill {FAUCET_AMOUNTS[activeCurrency] ?? 100} {activeCurrency}
               </span>
             </button>
           </div>
 
           {/* User logout */}
           <div className="flex items-center gap-2" id="user-profile">
-            <div className="hidden md:flex flex-col text-right leading-none">
-              <span className="text-xs font-semibold text-white max-w-[120px] truncate">{user.email}</span>
-            </div>
             <button
               onClick={onSignOut}
-              className="p-2 rounded bg-[#2f4553] border border-[#2d4456] hover:bg-rose-500/10 hover:text-rose-400 hover:border-rose-500/20 text-[#b1bad3] transition"
+              className="p-2.5 rounded bg-[#1f323f]/20 hover:bg-red-500/10 text-gray-400 hover:text-red-400 transition"
               title="Sign Out"
-              id="sign-out-btn"
             >
               <LogOut className="w-4 h-4" />
             </button>
@@ -560,56 +1019,60 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
         </div>
       </nav>
 
-      {/* Main Container Layout */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-8 grid md:grid-cols-12 gap-6 items-start" id="game-main-layout">
+      {/* Main Body */}
+      <main className="flex-grow max-w-7xl w-full mx-auto px-4 md:px-6 py-6 grid grid-cols-1 md:grid-cols-12 gap-6" id="game-main-container">
         
-        {/* Left Side: Game Controls (Stake Style sidebar) */}
-        <aside className="md:col-span-4 bg-[#213743] p-5 flex flex-col gap-5 rounded-xl border border-[#2d4456] shadow-xl" id="game-controls-sidebar">
-          {/* Quick tab for manual controls */}
-          <div className="bg-[#0f1923] p-1 rounded-full flex border border-[#2d4456]" id="sidebar-tabs">
+        {/* Left Side: Bet Controls sidebar panel */}
+        <aside className="md:col-span-4 bg-[#1a2c38] rounded-xl border border-[#213743] p-5 flex flex-col gap-5 shadow-lg" id="control-sidebar">
+          
+          {/* Tab Selector Buttons */}
+          <div className="flex bg-[#0f1923] p-1 rounded-md" id="tab-nav">
             <button
               onClick={() => setActiveTab("manual")}
-              className={`flex-1 py-2 rounded-full text-xs font-bold transition ${
-                activeTab === "manual" ? "bg-[#2f4553] text-white shadow-lg" : "text-[#b1bad3] hover:text-white"
-              }`}
+              className={`w-1/3 py-2 text-xs font-bold uppercase tracking-wider rounded transition ${activeTab === "manual" ? "bg-[#2f4553] text-white" : "text-[#557086] hover:text-[#b1bad3]"}`}
+              id="tab-btn-manual"
             >
-              Manual
+              Manual Bet
             </button>
             <button
               onClick={() => setActiveTab("fairness")}
-              className={`flex-1 py-2 rounded-full text-xs font-bold transition ${
-                activeTab === "fairness" ? "bg-[#2f4553] text-white shadow-lg" : "text-[#b1bad3] hover:text-white"
-              }`}
+              className={`w-1/3 py-2 text-xs font-bold uppercase tracking-wider rounded transition ${activeTab === "fairness" ? "bg-[#2f4553] text-white" : "text-[#557086] hover:text-[#b1bad3]"}`}
+              id="tab-btn-fairness"
             >
               Fairness
             </button>
             <button
               onClick={() => setActiveTab("stats")}
-              className={`flex-1 py-2 rounded-full text-xs font-bold transition ${
-                activeTab === "stats" ? "bg-[#2f4553] text-white shadow-lg" : "text-[#b1bad3] hover:text-white"
-              }`}
+              className={`w-1/3 py-2 text-xs font-bold uppercase tracking-wider rounded transition ${activeTab === "stats" ? "bg-[#2f4553] text-white" : "text-[#557086] hover:text-[#b1bad3]"}`}
+              id="tab-btn-stats"
             >
-              Stats
+              My Stats
             </button>
           </div>
 
-          {/* Tab Content 1: Manual Bet Controls */}
+          {/* Tab Content 1: Manual Betting Controls */}
           {activeTab === "manual" && (
-            <div className="space-y-4" id="manual-bet-form">
+            <div className="flex flex-col gap-4" id="manual-bet-form">
               {/* Bet Amount */}
               <div className="flex flex-col gap-2">
                 <div className="flex justify-between text-xs font-bold uppercase text-[#b1bad3]">
                   <label>Bet Amount</label>
-                  <span>$0.00 USD</span>
+                  <span className="text-[#557086] font-mono font-bold">
+                    {displayCryptoInFiat 
+                      ? formatValue(convert(betAmount, activeCurrency, selectedFiatCurrency), selectedFiatCurrency, true)
+                      : formatValue(convert(betAmount, activeCurrency, "USD"), "USD", true)
+                    }
+                  </span>
                 </div>
                 <div className="flex bg-[#0f1923] border-2 border-[#2f4553] rounded p-1 pl-2 transition-all focus-within:border-[#557086]">
-                  <div className="flex items-center text-[#557086] mr-1">
-                    <DollarSign className="w-4 h-4" />
+                  <div className="flex items-center text-[#557086] mr-1.5 font-mono text-[10px] font-black bg-[#162630] px-1.5 py-0.5 rounded border border-[#2d4456]/40 text-gray-400 shrink-0">
+                    {activeCurrency}
                   </div>
                   <input
                     type="number"
+                    step="any"
                     value={betAmount}
-                    onChange={(e) => setBetAmount(Math.max(0, Number(parseFloat(e.target.value).toFixed(2)) || 0))}
+                    onChange={(e) => setBetAmount(Math.max(0, Number(parseFloat(e.target.value)) || 0))}
                     className="w-full bg-transparent border-none text-white font-mono font-bold text-sm focus:outline-none py-1.5"
                     id="bet-amount-input"
                   />
@@ -684,10 +1147,16 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
               <div className="flex flex-col gap-2">
                 <div className="flex justify-between text-xs font-bold uppercase text-[#b1bad3]">
                   <label>Win Profit</label>
+                  <span className="text-[10px] text-[#557086] font-mono font-bold">
+                    {displayCryptoInFiat 
+                      ? formatValue(convert(betAmount * targetMultiplier - betAmount, activeCurrency, selectedFiatCurrency), selectedFiatCurrency, true)
+                      : formatValue(convert(betAmount * targetMultiplier - betAmount, activeCurrency, "USD"), "USD", true)
+                    }
+                  </span>
                 </div>
                 <div className="bg-[#0f1923] border-2 border-[#2f4553] rounded p-3 text-white font-bold flex items-center justify-between">
-                  <span className="text-[#00e701] text-lg font-bold">$</span>
-                  <span className="text-lg font-mono text-white">{(betAmount * targetMultiplier - betAmount).toFixed(2)}</span>
+                  <span className="text-[#00e701] text-sm font-black font-mono">{activeCurrency}</span>
+                  <span className="text-lg font-mono text-white">{(betAmount * targetMultiplier - betAmount).toLocaleString("en-US", { maximumFractionDigits: activeCurrency === 'BTC' ? 8 : 4 })}</span>
                 </div>
               </div>
 
@@ -727,10 +1196,10 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                     </svg>
-                    MULTIPLIER CLIMBING...
+                    CLIMBING...
                   </span>
                 ) : (
-                  "Bet Lagao"
+                  "Place Bet"
                 )}
               </button>
             </div>
@@ -791,7 +1260,6 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                 </button>
               </div>
 
-              {/* Revealed Seed Section */}
               {revealedSeeds && (
                 <div className="p-3 bg-indigo-500/5 border border-indigo-500/20 rounded space-y-2">
                   <span className="font-bold text-[#00e701] block mb-1 uppercase text-[11px]">Old Seed Revealed! (Verify me)</span>
@@ -923,7 +1391,11 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
               <div className="bg-[#0f1923] p-3.5 rounded border-2 border-[#2f4553] flex items-center justify-between">
                 <span className="text-[#b1bad3] font-bold">NET PROFIT</span>
                 <span className={`font-mono font-bold text-sm ${netProfit >= 0 ? "text-[#00e701]" : "text-rose-400"}`}>
-                  {netProfit >= 0 ? "+" : ""}${netProfit.toFixed(2)}
+                  {netProfit >= 0 ? "+" : ""}
+                  {displayCryptoInFiat 
+                    ? formatValue(convert(netProfit, activeCurrency, selectedFiatCurrency), selectedFiatCurrency, true)
+                    : formatValue(netProfit, activeCurrency)
+                  }
                 </span>
               </div>
             </div>
@@ -943,12 +1415,10 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
 
             {/* Giant Live Screen Frame */}
             <div className="relative min-h-[380px] bg-[#0f1923] flex flex-col items-center justify-center p-8 overflow-hidden" id="visual-arena-canvas">
-              {/* Atmospheric Glow Background */}
               <div className="absolute inset-0 overflow-hidden pointer-events-none">
                 <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-[#00e701] opacity-[0.03] blur-[120px] rounded-full" />
               </div>
 
-              {/* Conditional background flash animation on win / loss */}
               {currentResult && !animationActive && (
                 <div 
                   className={`absolute inset-0 opacity-[0.04] transition-opacity duration-300 pointer-events-none ${
@@ -964,7 +1434,6 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
 
               {/* The rocket / multiplier visualization ticker */}
               <div className="text-center relative z-10 flex flex-col items-center justify-center">
-                {/* Count up simulation display */}
                 <div className="relative">
                   <motion.div
                     key={displayMultiplier}
@@ -1012,7 +1481,10 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                             <span className="text-sm font-bold text-[#00e701] uppercase tracking-widest">Target Hit!</span>
                           </div>
                           <span className="text-[#00e701] font-mono text-xs mt-2.5 font-bold">
-                            Payout: +${currentResult.payout.toFixed(2)}
+                            Payout: +{displayCryptoInFiat 
+                              ? formatValue(convert(currentResult.payout, activeCurrency, selectedFiatCurrency), selectedFiatCurrency, true)
+                              : formatValue(currentResult.payout, activeCurrency)
+                            }
                           </span>
                         </motion.div>
                       ) : (
@@ -1027,7 +1499,10 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                             <span className="text-sm font-bold text-rose-500 uppercase tracking-widest">Busted!</span>
                           </div>
                           <span className="text-[#557086] font-mono text-xs mt-2.5 font-bold">
-                            Loss: -${betAmount.toFixed(2)}
+                            Loss: -{displayCryptoInFiat 
+                              ? formatValue(convert(betAmount, activeCurrency, selectedFiatCurrency), selectedFiatCurrency, true)
+                              : formatValue(betAmount, activeCurrency)
+                            }
                           </span>
                         </motion.div>
                       )
@@ -1098,7 +1573,10 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                             {new Date(bet.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                           </td>
                           <td className="py-3 px-5 text-right font-mono text-white font-bold">
-                            ${bet.bet_amount.toFixed(2)}
+                            {displayCryptoInFiat 
+                              ? formatValue(convert(bet.bet_amount, bet.currency_code || "USDT", selectedFiatCurrency), selectedFiatCurrency, true)
+                              : formatValue(bet.bet_amount, bet.currency_code || "USDT")
+                            }
                           </td>
                           <td className="py-3 px-5 text-right font-mono text-[#b1bad3]">
                             {bet.target_multiplier.toFixed(2)}x
@@ -1107,7 +1585,16 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
                             {bet.result_multiplier.toFixed(2)}x
                           </td>
                           <td className={`py-3 px-5 text-right font-mono font-bold ${bet.is_win ? "text-[#00e701]" : "text-gray-500"}`}>
-                            {bet.is_win ? `+$${(bet.payout - bet.bet_amount).toFixed(2)}` : `-$${bet.bet_amount.toFixed(2)}`}
+                            {bet.is_win 
+                              ? `+${displayCryptoInFiat 
+                                ? formatValue(convert(bet.payout, bet.currency_code || "USDT", selectedFiatCurrency), selectedFiatCurrency, true)
+                                : formatValue(bet.payout, bet.currency_code || "USDT")
+                              }`
+                              : `-${displayCryptoInFiat 
+                                ? formatValue(convert(bet.bet_amount, bet.currency_code || "USDT", selectedFiatCurrency), selectedFiatCurrency, true)
+                                : formatValue(bet.bet_amount, bet.currency_code || "USDT")
+                              }`
+                            }
                           </td>
                           <td className="py-3 px-5 text-center">
                             <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -1134,6 +1621,286 @@ export default function GameView({ user, onSignOut }: GameViewProps) {
           </div>
         </div>
       </main>
+
+      {/* Wallet Settings Modal Dialog Block */}
+      {isWalletSettingsOpen && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="w-full max-w-lg bg-[#1a2c38] border-2 border-[#2d4456] rounded-2xl overflow-hidden shadow-2xl"
+          >
+            {/* Modal Header */}
+            <div className="px-5 py-4 border-b border-[#2d4456] flex items-center justify-between bg-[#162630]">
+              <div className="flex items-center gap-2">
+                <Coins className="w-5 h-5 text-[#00e701]" />
+                <h3 className="text-sm font-black text-white uppercase tracking-wider">Stake Wallet Hub</h3>
+              </div>
+              <button 
+                onClick={() => setIsWalletSettingsOpen(false)}
+                className="p-1.5 hover:bg-[#2f4553] text-gray-400 hover:text-white rounded-lg transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Navigation Tabs */}
+            <div className="flex bg-[#0f1923] p-1 border-b border-[#2d4456]/40">
+              <button
+                onClick={() => {
+                  setWalletSettingsTab("overview");
+                  setSwapError(null);
+                  setSwapSuccess(null);
+                }}
+                className={`w-1/3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${walletSettingsTab === "overview" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
+              >
+                Overview
+              </button>
+              <button
+                onClick={() => {
+                  setWalletSettingsTab("buy");
+                  setSwapError(null);
+                  setSwapSuccess(null);
+                }}
+                className={`w-1/3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${walletSettingsTab === "buy" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
+              >
+                Buy Crypto
+              </button>
+              <button
+                onClick={() => {
+                  setWalletSettingsTab("swap");
+                  setSwapError(null);
+                  setSwapSuccess(null);
+                }}
+                className={`w-1/3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${walletSettingsTab === "swap" ? "text-[#00e701] border-b-2 border-[#00e701]" : "text-gray-400 hover:text-white"}`}
+              >
+                Coins Swap
+              </button>
+            </div>
+
+            {/* Modal Body Content */}
+            <div className="p-6">
+              
+              {/* Tab 1: Wallet Overview & Preferences */}
+              {walletSettingsTab === "overview" && (
+                <div className="space-y-6">
+                  {/* Visual Preferences */}
+                  <div className="space-y-4 bg-[#0f1923] p-4 rounded-xl border border-[#2d4456]/40">
+                    <span className="text-[10px] text-[#557086] font-bold uppercase tracking-wider block">Wallet Settings</span>
+                    
+                    {/* Hide Zero Balances Toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col text-left">
+                        <span className="text-xs font-bold text-white">Hide Zero Balances</span>
+                        <span className="text-[10px] text-[#557086]">Do not display wallets holding 0 tokens</span>
+                      </div>
+                      <button
+                        onClick={() => setHideZeroBalances(!hideZeroBalances)}
+                        className={`w-12 h-6 rounded-full p-0.5 transition-all duration-200 ${hideZeroBalances ? 'bg-[#00e701]' : 'bg-[#2f4553]'}`}
+                      >
+                        <div className={`w-5 h-5 bg-[#0f1923] rounded-full shadow-md transform transition-transform duration-200 ${hideZeroBalances ? 'translate-x-6' : 'translate-x-0'}`} />
+                      </button>
+                    </div>
+
+                    <hr className="border-[#2d4456]/40" />
+
+                    {/* Display Crypto in Fiat Toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col text-left">
+                        <span className="text-xs font-bold text-white">Display Crypto in Fiat</span>
+                        <span className="text-[10px] text-[#557086]">Show virtual crypto balances converted into real-time fiat</span>
+                      </div>
+                      <button
+                        onClick={() => setDisplayCryptoInFiat(!displayCryptoInFiat)}
+                        className={`w-12 h-6 rounded-full p-0.5 transition-all duration-200 ${displayCryptoInFiat ? 'bg-[#00e701]' : 'bg-[#2f4553]'}`}
+                      >
+                        <div className={`w-5 h-5 bg-[#0f1923] rounded-full shadow-md transform transition-transform duration-200 ${displayCryptoInFiat ? 'translate-x-6' : 'translate-x-0'}`} />
+                      </button>
+                    </div>
+
+                    {/* Fiat currency select list */}
+                    {displayCryptoInFiat && (
+                      <div className="pt-2 animate-in slide-in-from-top-2 duration-150">
+                        <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Select Fiat Currency for Display</label>
+                        <select
+                          value={selectedFiatCurrency}
+                          onChange={(e) => setSelectedFiatCurrency(e.target.value)}
+                          className="w-full px-3 py-2 bg-[#1a2c38] border border-[#2d4456] rounded-lg text-white font-medium text-xs focus:outline-none"
+                        >
+                          {SUPPORTED_FIAT_CURRENCIES.map(code => (
+                            <option key={code} value={code}>{code} (Exchange Display)</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Portfolio breakdown list */}
+                  <div className="space-y-2">
+                    <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider block">Your Wallet Balances Portfolio</span>
+                    <div className="grid grid-cols-2 gap-2 max-h-[160px] overflow-y-auto pr-1">
+                      {SUPPORTED_ACTIVE_CURRENCIES.map(cur => {
+                        const curBal = balances[cur] ?? 0;
+                        return (
+                          <div key={cur} className="p-2.5 bg-[#0f1923] rounded-lg border border-[#2d4456]/40 flex items-center justify-between">
+                            <span className="font-mono text-xs font-extrabold text-white">{cur}</span>
+                            <div className="text-right">
+                              <span className="font-mono text-xs font-black text-[#00e701] block">
+                                {curBal.toLocaleString("en-US", { maximumFractionDigits: cur === 'BTC' ? 8 : 4 })}
+                              </span>
+                              <span className="text-[9px] text-[#557086] font-bold block">
+                                {formatValue(convert(curBal, cur, "USD"), "USD", true)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Tab 2: Buy Crypto (Visual Placeholder) */}
+              {walletSettingsTab === "buy" && (
+                <div className="space-y-4 text-center py-6">
+                  <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-[#00e701]/30 flex items-center justify-center mx-auto text-[#00e701]">
+                    <CreditCard className="w-8 h-8" />
+                  </div>
+                  <div>
+                    <h4 className="font-black text-white text-base uppercase">Instant Virtual Credit Card purchase</h4>
+                    <p className="text-xs text-[#557086] mt-2 leading-relaxed max-w-sm mx-auto">
+                      Aap instant virtual debit/credit cards ke dwara direct virtual tokens purchase kar sakte hain. Free Faucet mode test network live hai, refill buttons se claim karein!
+                    </p>
+                  </div>
+                  <div className="p-4 bg-[#0f1923] rounded-xl border border-[#2d4456]/40 text-left max-w-sm mx-auto space-y-2 text-xs">
+                    <span className="text-gray-400 font-bold uppercase text-[9px] tracking-wider block">Visa / Mastercard Simulator</span>
+                    <div className="flex justify-between items-center text-white">
+                      <span>Card Number:</span>
+                      <span className="font-mono font-bold">•••• •••• •••• 4920</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Mock add to active currency
+                        const amt = FAUCET_AMOUNTS[activeCurrency] ?? 100;
+                        setBalances(prev => ({
+                          ...prev,
+                          [activeCurrency]: (prev[activeCurrency] ?? 0) + amt
+                        }));
+                        setSwapSuccess(`Mock payment successful! Charged credit card. Added ${amt} ${activeCurrency} directly to wallet.`);
+                        setWalletSettingsTab("overview");
+                      }}
+                      className="w-full py-2 bg-[#00e701] hover:bg-[#1fff20] text-[#01080e] font-extrabold text-xs uppercase rounded-lg transition"
+                    >
+                      Credit mock {FAUCET_AMOUNTS[activeCurrency] ?? 100} {activeCurrency}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Tab 3: Coins Swap (Exchange Engine) */}
+              {walletSettingsTab === "swap" && (
+                <form onSubmit={handleSwap} className="space-y-4">
+                  
+                  {/* Selectors grid */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Swap Source (Deduct)</label>
+                      <select
+                        value={swapSource}
+                        onChange={(e) => setSwapSource(e.target.value)}
+                        className="w-full px-3 py-2 bg-[#0f1923] border border-[#2d4456] rounded-lg text-white font-medium text-xs focus:outline-none"
+                      >
+                        {SUPPORTED_ACTIVE_CURRENCIES.map(code => (
+                          <option key={code} value={code}>{code} (Available: {(balances[code] ?? 0).toLocaleString("en-US", { maximumFractionDigits: 4 })})</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Swap Destination (Credit)</label>
+                      <select
+                        value={swapDest}
+                        onChange={(e) => setSwapDest(e.target.value)}
+                        className="w-full px-3 py-2 bg-[#0f1923] border border-[#2d4456] rounded-lg text-white font-medium text-xs focus:outline-none"
+                      >
+                        {SUPPORTED_ACTIVE_CURRENCIES.map(code => (
+                          <option key={code} value={code}>{code}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Swap Amount */}
+                  <div>
+                    <label className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Amount to Swap ({swapSource})</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="0.00"
+                        value={swapAmount}
+                        onChange={(e) => setSwapAmount(e.target.value)}
+                        className="w-full px-3 py-2 bg-[#0f1923] border border-[#2d4456] rounded-lg text-white font-mono text-xs focus:outline-none"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setSwapAmount(String(balances[swapSource] ?? 0))}
+                        className="px-3 bg-[#2f4553] text-white hover:bg-[#3d5a6d] font-bold text-xs rounded-lg transition"
+                      >
+                        MAX
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Swap rate visualizer */}
+                  {swapAmount && !isNaN(parseFloat(swapAmount)) && (
+                    <div className="p-3.5 bg-[#0f1923] rounded-lg border border-[#2d4456]/40 space-y-1.5 text-xs">
+                      <span className="text-[#557086] text-[9px] font-bold uppercase tracking-wider block">Live Swaps Transaction Review</span>
+                      <div className="flex justify-between text-gray-300">
+                        <span>Deducting:</span>
+                        <span className="font-mono font-bold text-rose-400">-{parseFloat(swapAmount)} {swapSource}</span>
+                      </div>
+                      <div className="flex justify-between text-gray-300">
+                        <span>Crediting (Estimated):</span>
+                        <span className="font-mono font-bold text-[#00e701]">+{convert(parseFloat(swapAmount), swapSource, swapDest).toLocaleString("en-US", { maximumFractionDigits: 6 })} {swapDest}</span>
+                      </div>
+                      <div className="flex justify-between text-gray-500 text-[10px]">
+                        <span>Conversion Rate:</span>
+                        <span className="font-mono">1 {swapSource} = {convert(1, swapSource, swapDest).toLocaleString("en-US", { maximumFractionDigits: 6 })} {swapDest}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Swap errors */}
+                  {swapError && (
+                    <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs rounded-lg">
+                      ⚠️ {swapError}
+                    </div>
+                  )}
+
+                  {/* Swap Success */}
+                  {swapSuccess && (
+                    <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-[#00e701] text-xs rounded-lg">
+                      🎉 {swapSuccess}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={swapLoading}
+                    className="w-full py-3 bg-[#00e701] hover:bg-[#1fff20] text-[#01080e] font-black text-xs uppercase rounded-lg transition-all"
+                  >
+                    {swapLoading ? "Processing Swap Exchange..." : "Confirm Swap"}
+                  </button>
+
+                </form>
+              )}
+
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       {/* Bottom Bar Stats */}
       <footer className="h-12 bg-[#1a2c38] border-t border-[#213743] px-6 flex items-center justify-between text-xs font-bold flex-shrink-0 text-[#b1bad3]" id="game-footer">

@@ -39,12 +39,6 @@ module.exports = (req, res, next) => {
       });
     }
 
-    // EXTRA DEBUG LOGGING
-    console.log('[Admin Auth Middleware] Incoming Token validation activity...');
-    console.log(`[Admin Auth Middleware] Raw Token length: ${token.length} characters.`);
-    console.log(`[Admin Auth Middleware] Secret key length: ${jwtSecret.length} characters.`);
-    console.log(`[Admin Auth Middleware] Token preview: ${token.substring(0, 15)}...${token.substring(token.length - 15)}`);
-
     // Token verify aur decode karein
     const decoded = jwt.verify(token, jwtSecret);
     

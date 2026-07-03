@@ -39,8 +39,6 @@ if (supabaseUrl && supabaseServiceKey) {
     console.log('====================================================');
     console.log('💚 [SupabaseClient] Client successfully initialized!');
     console.log(`📡 URL: ${cleanUrl}`);
-    console.log(`🔑 Service Role Key Length: ${supabaseServiceKey.length} chars`);
-    console.log(`🔑 Service Role Key Preview: ${supabaseServiceKey.substring(0, 10)}...${supabaseServiceKey.substring(supabaseServiceKey.length - 8)}`);
     console.log('====================================================');
   } catch (err) {
     console.error('❌ [SupabaseClient] Failed to create client:', err.message);

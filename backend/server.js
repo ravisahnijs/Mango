@@ -130,4 +130,19 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('🛡️  Helmet Security Headers is ACTIVE');
   console.log('⏱️  General Rate Limiter (100req/15m) is ACTIVE');
   console.log('====================================================');
+
+  // Startup Security Check for Weak Default Admin Hash
+  const defaultHashes = [
+    '$2a$10$j80vJ8H/L2h.i4G8kQyqM.pZHeQscCq1bTjQd3k9kOitMIs0qQn1W',
+    '$2b$10$oR19FzC2TshbVqAom6A/6erM8Vv98L8g5rI9eZ32v9o1.L2z4q7rC'
+  ];
+  if (defaultHashes.includes(process.env.ADMIN_PASSWORD_HASH)) {
+    console.log('\n\x1b[31m%s\x1b[0m', '################################################################');
+    console.log('\x1b[31m%s\x1b[0m', '⚠️  CRITICAL SECURITY WARNING: DEFAULT ADMIN PASSWORD HASH DETECTED');
+    console.log('\x1b[31m%s\x1b[0m', 'Your current ADMIN_PASSWORD_HASH corresponds to a publicly known');
+    console.log('\x1b[31m%s\x1b[0m', 'weak default password ("admin12345"). This is extremely vulnerable!');
+    console.log('\x1b[31m%s\x1b[0m', 'Please generate a strong, custom hash immediately using standard');
+    console.log('\x1b[31m%s\x1b[0m', 'bcrypt generation tools and update your environment variables.');
+    console.log('\x1b[31m%s\x1b[0m', '################################################################\n');
+  }
 });
